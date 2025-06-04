@@ -2,7 +2,15 @@ import bcrypt from 'bcrypt';
 import postgres from 'postgres';
 import { invoices, customers, revenue, users } from '../lib/placeholder-data';
 
-const sql = postgres(process.env.POSTGRES_URL!, { ssl: 'require' });
+const sql = postgres(process.env.POSTGRES_URL_NON_POOLING!, {
+  ssl: 'require',
+  max: 1,
+  idle_timeout: 20,
+  connect_timeout: 30,
+  connection: {
+    application_name: 'nextjs-dashboard-seed'
+  }
+});
 
 async function seedUsers() {
   await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
@@ -103,15 +111,55 @@ async function seedRevenue() {
 
 export async function GET() {
   try {
-    const result = await sql.begin((sql) => [
-      seedUsers(),
-      seedCustomers(),
-      seedInvoices(),
-      seedRevenue(),
-    ]);
+    console.log('Starting database seed...');
+    
+    const result = await sql.begin(async (sql) => {
+      console.log('Creating users...');
+      const users = await seedUsers();
+      
+      console.log('Creating customers...');
+      const customers = await seedCustomers();
+      
+      console.log('Creating invoices...');
+      const invoices = await seedInvoices();
+      
+      console.log('Creating revenue...');
+      const revenue = await seedRevenue();
+      
+      return { users, customers, invoices, revenue };
+    });
 
-    return Response.json({ message: 'Database seeded successfully' });
+    console.log('Database seeded successfully');
+    return new Response(
+      JSON.stringify({
+        message: 'Database seeded successfully',
+        details: {
+          usersCreated: result.users.length,
+          customersCreated: result.customers.length,
+          invoicesCreated: result.invoices.length,
+          revenueCreated: result.revenue.length
+        }
+      }),
+      {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }
+    );
   } catch (error) {
-    return Response.json({ error }, { status: 500 });
+    console.error('Error seeding database:', error);
+    return new Response(
+      JSON.stringify({
+        error: error instanceof Error ? error.message : 'Unknown error',
+        details: error
+      }),
+      {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }
+    );
   }
 }
