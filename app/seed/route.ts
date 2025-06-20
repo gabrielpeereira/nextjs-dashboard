@@ -2,164 +2,262 @@ import bcrypt from 'bcrypt';
 import postgres from 'postgres';
 import { invoices, customers, revenue, users } from '../lib/placeholder-data';
 
-const sql = postgres(process.env.POSTGRES_URL_NON_POOLING!, {
-  ssl: 'require',
-  max: 1,
-  idle_timeout: 20,
-  connect_timeout: 30,
-  connection: {
-    application_name: 'nextjs-dashboard-seed'
-  }
-});
+console.log('Verificando variável de ambiente:', process.env.POSTGRES_URL_NON_POOLING ? 'Definida' : 'Não definida');
 
-async function seedUsers() {
-  await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
-  await sql`
-    CREATE TABLE IF NOT EXISTS users (
-      id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-      name VARCHAR(255) NOT NULL,
-      email TEXT NOT NULL UNIQUE,
-      password TEXT NOT NULL
-    );
-  `;
-
-  const insertedUsers = await Promise.all(
-    users.map(async (user) => {
-      const hashedPassword = await bcrypt.hash(user.password, 10);
-      return sql`
-        INSERT INTO users (id, name, email, password)
-        VALUES (${user.id}, ${user.name}, ${user.email}, ${hashedPassword})
-        ON CONFLICT (id) DO NOTHING;
-      `;
-    }),
-  );
-
-  return insertedUsers;
+function createConnection() {
+  return postgres(process.env.POSTGRES_URL_NON_POOLING!, {
+    ssl: 'require',
+    max: 1,
+    idle_timeout: 20,
+    connect_timeout: 10,
+    max_lifetime: 60 * 30,
+    connection: {
+      application_name: 'nextjs-dashboard-seed'
+    }
+  });
 }
 
-async function seedInvoices() {
-  await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
+async function testConnection() {
+  const sql = createConnection();
+  try {
+    const result = await sql`SELECT 1 as test`;
+    return true;
+  } catch (error) {
+    console.error('Erro ao testar conexão:', error);
+    return false;
+  } finally {
+    await sql.end();
+  }
+}
 
-  await sql`
-    CREATE TABLE IF NOT EXISTS invoices (
-      id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-      customer_id UUID NOT NULL,
-      amount INT NOT NULL,
-      status VARCHAR(255) NOT NULL,
-      date DATE NOT NULL
-    );
-  `;
+async function checkUuidExtension() {
+  const sql = createConnection();
+  try {
+    const result = await sql`
+      SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp';
+    `;
+    if (result.length === 0) {
+      await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
+    }
+  } catch (error) {
+    console.error('Erro ao verificar/criar extensão:', error);
+    throw error;
+  } finally {
+    await sql.end();
+  }
+}
 
-  const insertedInvoices = await Promise.all(
-    invoices.map(
-      (invoice) => sql`
-        INSERT INTO invoices (customer_id, amount, status, date)
-        VALUES (${invoice.customer_id}, ${invoice.amount}, ${invoice.status}, ${invoice.date})
-        ON CONFLICT (id) DO NOTHING;
-      `,
-    ),
-  );
+async function checkUsersTable() {
+  const sql = createConnection();
+  try {
+    const result = await sql`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'users'
+      );
+    `;
+    
+    if (!result[0].exists) {
+      await sql`
+        CREATE TABLE users (
+          id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          email TEXT NOT NULL UNIQUE,
+          password TEXT NOT NULL
+        );
+      `;
+    }
+  } catch (error) {
+    console.error('Erro ao verificar/criar tabela users:', error);
+    throw error;
+  } finally {
+    await sql.end();
+  }
+}
 
-  return insertedInvoices;
+async function seedUsers() {
+  if (!await testConnection()) {
+    throw new Error('Falha ao testar conexão com o banco');
+  }
+  
+  for (const user of users) {
+    const sql = createConnection();
+    try {
+      const hashedPassword = await bcrypt.hash(user.password, 10);
+      try {
+        await sql`
+          INSERT INTO users (id, name, email, password)
+          VALUES (${user.id}, ${user.name}, ${user.email}, ${hashedPassword});
+        `;
+      } catch (insertError) {
+        if (insertError instanceof Error && 
+            (insertError.message.includes('duplicate key') || 
+             insertError.message.includes('violates unique constraint'))) {
+          continue;
+        }
+        throw insertError;
+      }
+    } catch (error) {
+      console.error(`Erro ao processar usuário ${user.email}:`, error);
+      throw error;
+    } finally {
+      await sql.end();
+    }
+  }
+  
+  return users;
 }
 
 async function seedCustomers() {
-  await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
+  const sql = createConnection();
+  try {
+    await sql`
+      CREATE TABLE IF NOT EXISTS customers (
+        id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        email VARCHAR(255) NOT NULL,
+        image_url VARCHAR(255) NOT NULL
+      );
+    `;
 
-  await sql`
-    CREATE TABLE IF NOT EXISTS customers (
-      id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-      name VARCHAR(255) NOT NULL,
-      email VARCHAR(255) NOT NULL,
-      image_url VARCHAR(255) NOT NULL
+    const insertedCustomers = await Promise.all(
+      customers.map(
+        (customer) => sql`
+          INSERT INTO customers (id, name, email, image_url)
+          VALUES (${customer.id}, ${customer.name}, ${customer.email}, ${customer.image_url})
+          ON CONFLICT (id) DO NOTHING;
+        `,
+      ),
     );
-  `;
 
-  const insertedCustomers = await Promise.all(
-    customers.map(
-      (customer) => sql`
-        INSERT INTO customers (id, name, email, image_url)
-        VALUES (${customer.id}, ${customer.name}, ${customer.email}, ${customer.image_url})
-        ON CONFLICT (id) DO NOTHING;
-      `,
-    ),
-  );
+    return insertedCustomers;
+  } finally {
+    await sql.end();
+  }
+}
 
-  return insertedCustomers;
+async function seedInvoices() {
+  const sql = createConnection();
+  try {
+    await sql`
+      CREATE TABLE IF NOT EXISTS invoices (
+        id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+        customer_id UUID NOT NULL,
+        amount INT NOT NULL,
+        status VARCHAR(255) NOT NULL,
+        date DATE NOT NULL
+      );
+    `;
+
+    const insertedInvoices = await Promise.all(
+      invoices.map(
+        (invoice) => sql`
+          INSERT INTO invoices (customer_id, amount, status, date)
+          VALUES (${invoice.customer_id}, ${invoice.amount}, ${invoice.status}, ${invoice.date})
+          ON CONFLICT (id) DO NOTHING;
+        `,
+      ),
+    );
+
+    return insertedInvoices;
+  } finally {
+    await sql.end();
+  }
 }
 
 async function seedRevenue() {
-  await sql`
-    CREATE TABLE IF NOT EXISTS revenue (
-      month VARCHAR(4) NOT NULL UNIQUE,
-      revenue INT NOT NULL
+  const sql = createConnection();
+  try {
+    await sql`
+      CREATE TABLE IF NOT EXISTS revenue (
+        month VARCHAR(4) NOT NULL UNIQUE,
+        revenue INT NOT NULL
+      );
+    `;
+
+    const insertedRevenue = await Promise.all(
+      revenue.map(
+        (rev) => sql`
+          INSERT INTO revenue (month, revenue)
+          VALUES (${rev.month}, ${rev.revenue})
+          ON CONFLICT (month) DO NOTHING;
+        `,
+      ),
     );
-  `;
 
-  const insertedRevenue = await Promise.all(
-    revenue.map(
-      (rev) => sql`
-        INSERT INTO revenue (month, revenue)
-        VALUES (${rev.month}, ${rev.revenue})
-        ON CONFLICT (month) DO NOTHING;
-      `,
-    ),
-  );
-
-  return insertedRevenue;
+    return insertedRevenue;
+  } finally {
+    await sql.end();
+  }
 }
 
 export async function GET() {
-  try {
-    console.log('Starting database seed...');
-    
-    const result = await sql.begin(async (sql) => {
-      console.log('Creating users...');
+  const maxRetries = 3;
+  let retryCount = 0;
+
+  while (retryCount < maxRetries) {
+    try {
+      const sql = createConnection();
+      try {
+        await checkUuidExtension();
+      } finally {
+        await sql.end();
+      }
+      
+      const sql2 = createConnection();
+      try {
+        await checkUsersTable();
+      } finally {
+        await sql2.end();
+      }
+      
       const users = await seedUsers();
-      
-      console.log('Creating customers...');
       const customers = await seedCustomers();
-      
-      console.log('Creating invoices...');
       const invoices = await seedInvoices();
-      
-      console.log('Creating revenue...');
       const revenue = await seedRevenue();
       
-      return { users, customers, invoices, revenue };
-    });
-
-    console.log('Database seeded successfully');
-    return new Response(
-      JSON.stringify({
-        message: 'Database seeded successfully',
-        details: {
-          usersCreated: result.users.length,
-          customersCreated: result.customers.length,
-          invoicesCreated: result.invoices.length,
-          revenueCreated: result.revenue.length
+      return new Response(
+        JSON.stringify({
+          message: 'Database seeded successfully',
+          details: {
+            usersCreated: users.length,
+            customersCreated: customers.length,
+            invoicesCreated: invoices.length,
+            revenueCreated: revenue.length
+          }
+        }),
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+          },
         }
-      }),
-      {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-        },
+      );
+    } catch (error) {
+      console.error(`Erro na tentativa ${retryCount + 1}:`, error);
+      
+      if (error instanceof Error && error.message.includes('CONNECTION_CLOSED')) {
+        retryCount++;
+        if (retryCount < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
       }
-    );
-  } catch (error) {
-    console.error('Error seeding database:', error);
-    return new Response(
-      JSON.stringify({
-        error: error instanceof Error ? error.message : 'Unknown error',
-        details: error
-      }),
-      {
-        status: 500,
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+      
+      return new Response(
+        JSON.stringify({
+          error: error instanceof Error ? error.message : 'Unknown error',
+          details: error,
+          attempt: retryCount + 1
+        }),
+        {
+          status: 500,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+    }
   }
 }
